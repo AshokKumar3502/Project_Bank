@@ -1,0 +1,16 @@
+.nav_bar {
+  width: 100vw;
+  padding: 8px;
+  background-color: dodgerblue;
+  font-size: 1.4rem;
+  color: white;
+  text-transform: capitalize;
+  letter-spacing: 3px;
+  word-spacing: 6px;
+  font-family: "Dancing Script", cursive;
+  height: 60px;
+}
+
+.nav_bar > div > h1 {
+  margin-left: 25px;
+}
