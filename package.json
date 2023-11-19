@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "kafkajs": "^2.2.4",
     "package-lock.json": "^1.0.0",
     "package.json": "^2.0.1"
   }
