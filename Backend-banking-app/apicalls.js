@@ -70,7 +70,7 @@ app.post("/create", (req, res) => {
 app.put("/deposit", (req, res) => {
   const msg = { action: "deposit", data: req.body };
   producer.send(
-    [{ topic: "deposit", messages: JSON.stringify(msg) }],
+    [{ topic: "new-account", messages: JSON.stringify(msg) }],
     (err, data) => {
       if (err) {
         console.error("Error sending message:", err);
@@ -90,7 +90,7 @@ app.put("/deposit", (req, res) => {
 app.put("/withdraw", (req, res) => {
   const msg = { action: "withdraw", data: req.body };
   producer.send(
-    [{ topic: "withdraw", messages: JSON.stringify(msg) }],
+    [{ topic: "new-account", messages: JSON.stringify(msg) }],
     (err, data) => {
       if (err) {
         console.error("Error sending message:", err);
@@ -110,7 +110,7 @@ app.put("/withdraw", (req, res) => {
 app.put("/transfer", (req, res) => {
   const msg = { action: "transfer", data: req.body };
   producer.send(
-    [{ topic: "transfer", messages: JSON.stringify(msg) }],
+    [{ topic: "new-account", messages: JSON.stringify(msg) }],
     (err, data) => {
       if (err) {
         console.error("Error sending message:", err);
@@ -131,7 +131,7 @@ app.get("/balance/:acId", (req, res) => {
   const acId = req.params.acId;
   const msg = { action: "check-balance", data: { acId } };
   producer.send(
-    [{ topic: "check-balance", messages: JSON.stringify(msg) }],
+    [{ topic: "new-account", messages: JSON.stringify(msg) }],
     (err, data) => {
       if (err) {
         console.error("Error sending message:", err);
