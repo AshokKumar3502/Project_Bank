@@ -8,14 +8,7 @@ const kafka = require("kafka-node");
 const redis = require("redis");
 const crypto = require("crypto");
 
-const {
-  createNewAccount,
-  withdraw,
-  deposit,
-  transfer,
-  checkBalance,
-  usersList,
-} = require("./consumer");
+
 
 // Create Kafka producer
 const Producer = kafka.Producer;
@@ -241,80 +234,148 @@ app.put("/withdraw", async (req, res) => {
     res.status(500).json({ status: "Error", message: "Internal Server Error" });
   }
 });
-// Endpoint to transfer funds
-app.put("/transfer", async (req, res) => {
-  try {
-    const { srcId, destId, amount } = req.body;
 
-    if (!srcId || !destId || !amount) {
-      return res.status(400).json({
+
+
+// Endpoint to transfer funds
+
+app.put("/transfer", async (req, res) => {
+  const { srcId, destId, amount } = req.body;
+
+  if (!srcId || !destId || !amount) {
+    return res.status(400).json({
+      status: "Error",
+      message: "Missing required fields: srcId, destId, and amount",
+    });
+  }
+
+  const utr = generateUTR();
+  const msg = {
+    action: "transfer",
+    data: {
+      srcId,
+      destId,
+      amount,
+      utr,
+      status: "success",
+      message: "Transfer request sent.",
+    },
+  };
+
+  // Store UTR and message data in Redis with expiration
+  redisClient.set(utr, JSON.stringify(msg), "EX", 3600, (error, reply) => {
+    if (error) {
+      console.error("Error setting value in Redis:", error);
+    } else {
+      console.log("Value stored in Redis:", reply);
+    }
+  });
+
+  // Send message to Kafka
+  producer.send([{ topic: "transfer", messages: JSON.stringify(msg) }]);
+
+  // Start a database transaction
+  connection.beginTransaction(async (err) => {
+    if (err) {
+      console.error("Error starting transaction:", err);
+      return res.status(500).json({
         status: "Error",
-        message: "Missing required fields: srcId, destId, and amount",
+        message: "Internal Server Error",
       });
     }
 
-    const utr = generateUTR();
-    const msg = {
-      action: "transfer",
-      data: {
+    try {
+      // Lock source and destination accounts to prevent concurrent updates
+      const sourceQuery = `SELECT * FROM Kafkadatbase WHERE id = ${srcId} FOR UPDATE`;
+      const destinationQuery = `SELECT * FROM Kafkadatbase WHERE id = ${destId} FOR UPDATE`;
+
+      const [sourceAccount, destinationAccount] = await Promise.all([
+        new Promise((resolve, reject) => {
+          connection.query(sourceQuery, (err, results) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(results[0]);
+            }
+          });
+        }),
+        new Promise((resolve, reject) => {
+          connection.query(destinationQuery, (err, results) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(results[0]);
+            }
+          });
+        })
+      ]);
+
+      if (!sourceAccount || !destinationAccount) {
+        await connection.rollback();
+        return res.status(404).json({
+          status: "Error",
+          message: "Source or destination account not found",
+        });
+      }
+
+      if (sourceAccount.balance < amount) {
+        await connection.rollback();
+        return res.status(400).json({
+          status: "Error",
+          message: "Insufficient balance in the source account",
+        });
+      }
+
+      // Update balances
+      const srcNewBalance = sourceAccount.balance - amount;
+      const destNewBalance = destinationAccount.balance + amount;
+
+      const updateSourceQuery = `UPDATE Kafkadatbase SET balance = ${srcNewBalance} WHERE id = ${srcId}`;
+      const updateDestQuery = `UPDATE Kafkadatbase SET balance = ${destNewBalance} WHERE id = ${destId}`;
+
+      await Promise.all([
+        new Promise((resolve, reject) => {
+          connection.query(updateSourceQuery, (err, result) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(result);
+            }
+          });
+        }),
+        new Promise((resolve, reject) => {
+          connection.query(updateDestQuery, (err, result) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(result);
+            }
+          });
+        })
+      ]);
+
+      await connection.commit(); // Commit the transaction
+
+      // Send response after successful transaction
+      res.status(200).json({
+        status: "Success",
+        message: "Transfer completed successfully",
+        utr,
         srcId,
         destId,
         amount,
-        utr,
-        status: "success",
-        message: "Transfer request sent.",
-      },
-    };
-
-    // Store UTR and message data in Redis with expiration
-    redisClient.set(utr, JSON.stringify(msg), "EX", 3600, (error, reply) => {
-      if (error) {
-        console.error("Error setting value in Redis:", error);
-      } else {
-        console.log("Value stored in Redis:", reply);
-      }
-    });
-
-    // Send message to Kafka
-    producer.send([{ topic: "transfer", messages: JSON.stringify(msg) }]);
-
-    // Update balances in MySQL
-    const srcQuery = `UPDATE Kafkadatbase SET balance = balance - ${amount} WHERE id = ${srcId}`;
-    const destQuery = `UPDATE Kafkadatbase SET balance = balance + ${amount} WHERE id = ${destId}`;
-    connection.query(srcQuery, (err, srcResults) => {
-      if (err) {
-        console.error("Error updating source balance in MySQL:", err);
-        return res.status(500).json({
-          status: "Error",
-          message: "Internal Server Error",
-        });
-      }
-      console.log("Source balance updated in MySQL:", srcResults);
-      // Update destination balance
-      connection.query(destQuery, (err, destResults) => {
-        if (err) {
-          console.error("Error updating destination balance in MySQL:", err);
-          return res.status(500).json({
-            status: "Error",
-            message: "Internal Server Error",
-          });
-        }
-        console.log("Destination balance updated in MySQL:", destResults);
-        res.status(200).json({
-          status: "Success",
-          message: "Transfer request sent.",
-          utr,
-          amount,
-          srcId,
-          destId,
-        });
       });
-    });
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ status: "Error", message: "Internal Server Error" });
-  }
+    } catch (error) {
+      await connection.rollback(); // Rollback the transaction in case of error
+      console.error("Error:", error);
+      res.status(500).json({
+        status: "Error",
+        message: "Internal Server Error",
+      });
+    }
+  });
 });
+
 
 // Endpoint to check balance
 app.get("/balance/:acId", async (req, res) => {
