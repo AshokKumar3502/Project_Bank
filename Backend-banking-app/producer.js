@@ -1,4 +1,5 @@
-///    ORIGINAL CODE
+
+// Import required modules
 const express = require("express");
 const app = express();
 const cors = require("cors");
@@ -29,7 +30,7 @@ const connection = mysql.createConnection({
   database: "bankdb",
 });
 
-
+// Create Redis client
 
 const redisClient = redis.createClient();
 
@@ -46,15 +47,6 @@ async function connectRedis() {
 
 connectRedis();
 
-
-  
-// Utility function to generate UTR code
-function generateUTR() {
-  const timestamp = Date.now().toString();
-  const randomString = crypto.randomBytes(16).toString("hex").substr(0, 5);
-  return timestamp + randomString;
-}
-
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -68,14 +60,20 @@ connection.connect((err) => {
   }
 });
 
+// Redis error handling
+redisClient.on('error', err => console.log('Redis Client Error', err));
 
+// Utility function to generate UTR code
+function generateUTR() {
+  const timestamp = Date.now().toString();
+  const randomString = crypto.randomBytes(16).toString("hex").substr(0, 5);
+  return timestamp + randomString;
+}
 
 // Kafka producer ready event
 producer.on("ready", () => {
   console.log("Kafka Producer is ready");
 });
-
-
 
 // Endpoint to create a new account
 app.post("/create", (req, res) => {
@@ -89,35 +87,38 @@ app.post("/create", (req, res) => {
       message: "Account creation request sent."
     }
   };
-  
+
   // Store the account data in Redis
-  redisClient.set(`account:${utr}`, msg.data, (err, reply) => {
+  redisClient.set(`account:${utr}`, JSON.stringify(msg.data), (err, reply) => {
     if (err) {
       console.error("Error storing account data in Redis:", err);
-      res
-        .status(500)
-        .json({ status: "Error", message: "Internal Server Error" });
+      res.status(500).json({ status: "Error", message: "Internal Server Error" });
     } else {
       console.log("Account data stored in Redis:", reply);
       // Publish the message to Kafka
-      producer.send(
-        [{ topic: "new-account", messages: JSON.stringify(msg) }],
-        (err, data) => {
-          if (err) {
-            console.error("Error sending message:", err);
-            res
-              .status(500)
-              .json({ status: "Error", message: "Internal Server Error" });
-          } else {
-            res
-              .status(200)
-              .json({ status: "Success", message: "Account creation request sent.", utr });
-          }
+      producer.send([{ topic: "new-account", messages: JSON.stringify(msg) }], (err, data) => {
+        if (err) {
+          console.error("Error sending message:", err);
+          res.status(500).json({ status: "Error", message: "Internal Server Error" });
+        } else {
+          // Commit the transaction to the database
+          connection.commit((err) => {
+            if (err) {
+              console.error("Error committing transaction:", err);
+              connection.rollback(); // Rollback the transaction in case of error
+              res.status(500).json({ status: "Error", message: "Internal Server Error" });
+            } else {
+              console.log("Transaction committed successfully");
+              res.status(200).json({ status: "Success", message: "Account creation request sent.", utr });
+            }
+          });
         }
-      );
+      });
     }
   });
 });
+
+// Other endpoints (withdraw, deposit, transfer, balance check, users list) follow a similar pattern
 
 // Endpoint to deposit funds
 app.put("/deposit", async (req, res) => {
@@ -151,15 +152,28 @@ app.put("/deposit", async (req, res) => {
         console.log("Value stored in Redis:", reply);
       }
     });
+
     // Send message to Kafka
     producer.send([{ topic: "deposit", messages: JSON.stringify(msg) }]);
 
-    res.status(200).json({
-      status: "Success",
-      message: "Deposit request sent.",
-      utr,
-      amount,
-      acId,
+    // Update balance in MySQL
+    const query = `UPDATE Kafkadatbase SET balance = balance + ${amount} WHERE id = ${acId}`;
+    connection.query(query, (err, results) => {
+      if (err) {
+        console.error("Error updating balance in MySQL:", err);
+        return res.status(500).json({
+          status: "Error",
+          message: "Internal Server Error",
+        });
+      }
+      console.log("Balance updated in MySQL:", results);
+      res.status(200).json({
+        status: "Success",
+        message: "Deposit request sent.",
+        utr,
+        amount,
+        acId,
+      });
     });
   } catch (error) {
     console.error("Error:", error);
@@ -203,19 +217,30 @@ app.put("/withdraw", async (req, res) => {
     // Send message to Kafka
     producer.send([{ topic: "withdraw", messages: JSON.stringify(msg) }]);
 
-    res.status(200).json({
-      status: "Success",
-      message: "Withdrawal request sent.",
-      utr,
-      amount,
-      acId,
+    // Update balance in MySQL
+    const query = `UPDATE Kafkadatbase SET balance = balance - ${amount} WHERE id = ${acId}`;
+    connection.query(query, (err, results) => {
+      if (err) {
+        console.error("Error updating balance in MySQL:", err);
+        return res.status(500).json({
+          status: "Error",
+          message: "Internal Server Error",
+        });
+      }
+      console.log("Balance updated in MySQL:", results);
+      res.status(200).json({
+        status: "Success",
+        message: "Withdrawal request sent.",
+        utr,
+        amount,
+        acId,
+      });
     });
   } catch (error) {
     console.error("Error:", error);
     res.status(500).json({ status: "Error", message: "Internal Server Error" });
   }
 });
-
 // Endpoint to transfer funds
 app.put("/transfer", async (req, res) => {
   try {
@@ -249,16 +274,41 @@ app.put("/transfer", async (req, res) => {
         console.log("Value stored in Redis:", reply);
       }
     });
+
     // Send message to Kafka
     producer.send([{ topic: "transfer", messages: JSON.stringify(msg) }]);
 
-    res.status(200).json({
-      status: "Success",
-      message: "Transfer request sent.",
-      utr,
-      amount,
-      destId,
-      srcId,
+    // Update balances in MySQL
+    const srcQuery = `UPDATE Kafkadatbase SET balance = balance - ${amount} WHERE id = ${srcId}`;
+    const destQuery = `UPDATE Kafkadatbase SET balance = balance + ${amount} WHERE id = ${destId}`;
+    connection.query(srcQuery, (err, srcResults) => {
+      if (err) {
+        console.error("Error updating source balance in MySQL:", err);
+        return res.status(500).json({
+          status: "Error",
+          message: "Internal Server Error",
+        });
+      }
+      console.log("Source balance updated in MySQL:", srcResults);
+      // Update destination balance
+      connection.query(destQuery, (err, destResults) => {
+        if (err) {
+          console.error("Error updating destination balance in MySQL:", err);
+          return res.status(500).json({
+            status: "Error",
+            message: "Internal Server Error",
+          });
+        }
+        console.log("Destination balance updated in MySQL:", destResults);
+        res.status(200).json({
+          status: "Success",
+          message: "Transfer request sent.",
+          utr,
+          amount,
+          srcId,
+          destId,
+        });
+      });
     });
   } catch (error) {
     console.error("Error:", error);
@@ -267,50 +317,112 @@ app.put("/transfer", async (req, res) => {
 });
 
 // Endpoint to check balance
-app.get("/balance/:acId", (req, res) => {
-  const acId = req.params.acId;
-  const utr = generateUTR();
-  const msg = {
-    action: "check-balance",
-    data: {
-      acId,
-      utr,
-      status: "success",
-      message: "Balance check request sent.",
-    },
-  };
+app.get("/balance/:acId", async (req, res) => {
+  try {
+    const acId = req.params.acId;
+    const utr = generateUTR();
+    const msg = {
+      action: "check-balance",
+      data: {
+        acId,
+        utr,
+        status: "success",
+        message: "Balance check request sent.",
+      },
+    };
 
-  // Send message to Kafka
-  producer.send([{ topic: "balance-check", messages: JSON.stringify(msg) }]);
+    // Send message to Kafka
+    producer.send([{ topic: "balance-check", messages: JSON.stringify(msg) }]);
 
-  res.status(200).json({
-    status: "Success",
-    message: "Balance check request sent.",
-    utr,
-    acId,
-  });
+    // Retrieve balance from MySQL
+    const query = `SELECT balance FROM Kafkadatbase WHERE id = ${acId}`;
+    connection.query(query, (err, results) => {
+      if (err) {
+        console.error("Error retrieving balance from MySQL:", err);
+        return res.status(500).json({
+          status: "Error",
+          message: "Internal Server Error",
+        });
+      }
+      const balance = results[0].balance;
+      console.log("Balance retrieved from MySQL:", balance);
+      res.status(200).json({
+        status: "Success",
+        message: "Balance check request sent.",
+        utr,
+        acId,
+        balance,
+      });
+    });
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ status: "Error", message: "Internal Server Error" });
+  }
 });
 
 // Endpoint to get user list
-app.get("/users", (req, res) => {
-  const query = "SELECT * FROM Kafkadatbase";
-  connection.query(query, (err, results) => {
-    if (err) {
-      console.error("Error retrieving user data:", err);
-      res
-        .status(500)
-        .json({ status: "Error", message: "Internal Server Error" });
-    } else {
+app.get("/users", async (req, res) => {
+  try {
+    const query = "SELECT * FROM Kafkadatbase";
+    connection.query(query, (err, results) => {
+      if (err) {
+        console.error("Error retrieving user data from MySQL:", err);
+        return res.status(500).json({
+          status: "Error",
+          message: "Internal Server Error",
+        });
+      }
+      console.log("User data retrieved from MySQL:", results);
       res.status(200).json({ status: "Success", users: results });
-    }
-  });
+    });
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ status: "Error", message: "Internal Server Error" });
+  }
 });
+
 
 // Start server
 const port = 3100;
 app.listen(port, () => {
   console.log(`Banking App listening on port: ${port}`);
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
