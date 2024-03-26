@@ -24,6 +24,8 @@ export default function Users() {
               <th>Account Id</th>
               <th>Name</th>
               <th>BALANCE(₹)</th>
+              <th>UTR_Number</th>
+
             </tr>
           </thead>
           <tbody>
@@ -32,6 +34,7 @@ export default function Users() {
                 <td>{data.id}</td>
                 <td>{data.ac_nm}</td>
                 <td>{data.balance}</td>
+                <td>{data.utr}</td>
               </tr>
             ))}
           </tbody>

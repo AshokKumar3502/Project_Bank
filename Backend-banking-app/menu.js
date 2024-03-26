@@ -6,7 +6,7 @@ const {
   transfer,
   checkBalance,
   usersList,
-} = require("./server");
+} = require("./consumer");
 
 const rl = readline.createInterface({
   input: process.stdin,
